@@ -1,0 +1,13 @@
+DESIGN.md
+DOMAIN.md
+.venv/
+__pycache__/
+.env
+persona.yaml
+images/*
+!images/.keep
+*.upload.jpg
+logs/*
+!logs/.keep
+run/*
+!run/.keep

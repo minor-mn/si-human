@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI人物ビデオ通話</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <section class="stage">
+      <video id="persona-video" autoplay playsinline></video>
+      <video id="self-video" autoplay playsinline muted></video>
+      <div id="status" class="status">「通話を開始」を押してください</div>
+    </section>
+
+    <section class="controls">
+      <label>LLM <select id="provider"></select></label>
+      <button id="start-btn">通話を開始</button>
+      <button id="stop-btn" disabled>終了</button>
+      <button id="mute-btn" disabled>マイクをミュート</button>
+      <label><input type="checkbox" id="send-camera" checked> カメラ映像をAIに見せる</label>
+      <label><input type="checkbox" id="show-self" checked> 自分の映像を表示</label>
+    </section>
+
+    <section class="panels">
+      <div class="panel">
+        <h2>会話</h2>
+        <ol id="transcript"></ol>
+      </div>
+      <div class="panel">
+        <h2>遅延（発話終了 → 応答テキスト最初の断片）</h2>
+        <ol id="latency"></ol>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
