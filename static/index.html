@@ -11,12 +11,13 @@
     <section class="stage">
       <video id="persona-video" autoplay playsinline></video>
       <video id="self-video" autoplay playsinline muted></video>
-      <div id="status" class="status">「通話を開始」を押してください</div>
+      <div id="status" class="status">「接続準備」を押してください</div>
     </section>
 
     <section class="controls">
       <label>LLM <select id="provider"></select></label>
-      <button id="start-btn">通話を開始</button>
+      <button id="prepare-btn" disabled>接続準備</button>
+      <button id="start-btn" hidden disabled>接続する</button>
       <button id="stop-btn" disabled>終了</button>
       <button id="mute-btn" disabled>マイクをミュート</button>
       <label><input type="checkbox" id="send-camera" checked> カメラ映像をAIに見せる</label>
@@ -31,6 +32,11 @@
       <div class="panel">
         <h2>遅延（発話終了 → 応答テキスト最初の断片）</h2>
         <ol id="latency"></ol>
+      </div>
+      <div class="panel" id="news-panel" hidden>
+        <h2 id="news-heading">SlashdotのITセキュリティ・AIの話題</h2>
+        <div id="news-summary"></div>
+        <ol id="news-sources"></ol>
       </div>
     </section>
   </main>

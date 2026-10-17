@@ -99,6 +99,7 @@ select {
 }
 
 button#start-btn { background: var(--accent); color: #fff; border-color: var(--accent); }
+button#prepare-btn:not(.secondary) { background: var(--accent); color: #fff; border-color: var(--accent); }
 button:disabled { opacity: 0.4; cursor: default; }
 
 label { font-size: 14px; color: var(--muted); }
@@ -127,3 +128,7 @@ label { font-size: 14px; color: var(--muted); }
 #transcript li.user { color: var(--muted); }
 #transcript li.persona::before { content: "▶ "; color: var(--accent); }
 #latency li { font-variant-numeric: tabular-nums; }
+#news-panel { grid-column: 1 / -1; }
+#news-summary { margin: 0 0 8px; font-size: 14px; line-height: 1.7; white-space: pre-line; }
+#news-summary p { margin: 0 0 8px; }
+#news-panel a { color: var(--accent); overflow-wrap: anywhere; }

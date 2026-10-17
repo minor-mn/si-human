@@ -1,13 +1,17 @@
 import { createClient, AnamEvent } from "https://cdn.jsdelivr.net/npm/@anam-ai/js-sdk@4.27.1/+esm";
 
 const $ = (id) => document.getElementById(id);
+const prepareBtn = $("prepare-btn");
 const startBtn = $("start-btn");
 const stopBtn = $("stop-btn");
 const muteBtn = $("mute-btn");
 const statusEl = $("status");
 const providerSelect = $("provider");
+const PREPARATION_KEY = "si-human.preparationId";
 
 let anamClient = null;
+let preparationId = null;
+let pendingGreeting = null; // 人物への接続に失敗した場合も、準備済みの挨拶を再試行で使う
 let conversationId = null; // 再接続しても同じ会話を続けるために保持
 let cameraStream = null;
 let lastHandledMessageId = null;
@@ -17,42 +21,143 @@ let muted = false;
 let llmName = "";
 
 async function loadConfig() {
-  const config = await (await fetch("api/config")).json();
+  const config = await readJson(await fetch("api/config"));
   providerSelect.replaceChildren(
     ...config.providers.map((p) => new Option(p === "claude" ? "Claude" : "OpenAI", p)),
   );
   providerSelect.value = config.default_provider;
+  prepareBtn.disabled = false;
+  let savedId;
+  try { savedId = localStorage.getItem(PREPARATION_KEY); } catch {}
+  if (!savedId) return;
+  prepareBtn.disabled = true;
+  setStatus("保存した準備データを読み込んでいます…");
+  try {
+    const prepared = await readJson(await fetch(`api/preparations/${encodeURIComponent(savedId)}`));
+    usePreparedData(prepared, true);
+  } catch (error) {
+    if (error.status === 404 || error.status === 409) rememberPreparation(null);
+    showIdleControls();
+    setStatus(`保存した準備データを読み込めませんでした: ${error.message}`);
+  }
 }
 
 function setStatus(text) {
   statusEl.textContent = text;
 }
 
-async function startCall() {
-  startBtn.disabled = true;
-  setStatus("接続中…");
+function showIdleControls() {
+  const canConnect = Boolean(preparationId || conversationId);
+  prepareBtn.disabled = false;
+  prepareBtn.textContent = conversationId ? "新しい話題を準備" : preparationId ? "準備し直す" : "接続準備";
+  prepareBtn.classList.toggle("secondary", canConnect);
+  startBtn.hidden = !canConnect;
+  startBtn.disabled = !canConnect;
+  startBtn.textContent = conversationId ? "続きから接続" : "接続する";
+  providerSelect.disabled = false;
+}
 
-  const res = await fetch("api/session", {
+function rememberPreparation(id) {
+  try {
+    if (id) localStorage.setItem(PREPARATION_KEY, id);
+    else localStorage.removeItem(PREPARATION_KEY);
+  } catch {}
+}
+
+function usePreparedData(prepared, restored = false) {
+  preparationId = prepared.preparation_id;
+  rememberPreparation(preparationId);
+  if (prepared.provider) providerSelect.value = prepared.provider;
+  if (prepared.news) renderNews(prepared.news);
+  showIdleControls();
+  const warning = prepared.warnings?.length ? ` ${prepared.warnings.join(" ")}` : "";
+  setStatus(`${restored ? "保存した準備データを復元しました。" : "準備ができました。"}「接続する」を押してください。${warning}`);
+}
+
+async function readJson(response) {
+  if (!response.ok) {
+    let message = `処理に失敗しました (${response.status})`;
+    try {
+      const error = await response.json();
+      if (typeof error.detail === "string") message = error.detail;
+    } catch {}
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
+  }
+  return response.json();
+}
+
+async function postJson(path, body) {
+  return readJson(await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ conversation_id: conversationId, provider: providerSelect.value }),
-  });
-  if (!res.ok) {
-    setStatus(`セッション作成に失敗しました (${res.status})`);
-    startBtn.disabled = false;
-    return;
+    body: JSON.stringify(body),
+  }));
+}
+
+async function prepareConnection() {
+  preparationId = null;
+  rememberPreparation(null);
+  conversationId = null;
+  pendingGreeting = null;
+  prepareBtn.disabled = true;
+  prepareBtn.textContent = "準備中…";
+  startBtn.hidden = true;
+  startBtn.disabled = true;
+  providerSelect.disabled = true;
+  $("news-panel").hidden = true;
+  setStatus("話題とコメントを準備しています…");
+
+  const prepared = await postJson("api/prepare", { provider: providerSelect.value });
+  usePreparedData(prepared);
+}
+
+async function startCall() {
+  startBtn.disabled = true;
+  prepareBtn.disabled = true;
+  providerSelect.disabled = true;
+  setStatus("接続中…");
+
+  let session;
+  try {
+    session = await postJson("api/session", {
+      ...(conversationId ? { conversation_id: conversationId } : { preparation_id: preparationId }),
+      provider: providerSelect.value,
+    });
+  } catch (error) {
+    if (error.status === 409) {
+      preparationId = null;
+      rememberPreparation(null);
+      conversationId = null;
+      pendingGreeting = null;
+      $("news-panel").hidden = true;
+    }
+    throw error;
   }
-  const session = await res.json();
+  preparationId = null;
+  rememberPreparation(null);
   conversationId = session.conversation_id;
+  if (session.greeting) pendingGreeting = session.greeting;
   llmName = session.llm;
+  lastHandledMessageId = null;
+  speechEndedAt = null;
+  muted = false;
+  muteBtn.textContent = "マイクをミュート";
+  if (session.news) renderNews(session.news);
   providerSelect.disabled = true;
 
-  anamClient = createClient(session.session_token);
+  const client = createClient(session.session_token);
+  anamClient = client;
   anamClient.addListener(AnamEvent.SESSION_READY, () => {
+    if (anamClient !== client) return;
     setStatus(`${session.persona_name} と通話中（${llmName}）`);
     stopBtn.disabled = false;
     muteBtn.disabled = false;
-    if (session.greeting) anamClient.talk(session.greeting);
+    if (pendingGreeting) {
+      anamClient.talk(pendingGreeting);
+      pendingGreeting = null;
+    }
   });
   anamClient.addListener(AnamEvent.USER_SPEECH_ENDED, () => {
     speechEndedAt = performance.now();
@@ -63,12 +168,12 @@ async function startCall() {
     if (inFlight?.correlationId === correlationId) inFlight.controller.abort();
   });
   anamClient.addListener(AnamEvent.CONNECTION_CLOSED, () => {
+    if (anamClient !== client) return;
     inFlight?.controller.abort();
     anamClient = null;
     stopCamera(); // マイクは SDK が止めるが、カメラはこちらで取得したので自分で止める
-    setStatus("通話が終了しました（「通話を開始」で続きから再開できます。LLM を変えても履歴は引き継がれます）");
-    startBtn.disabled = false;
-    providerSelect.disabled = false;
+    setStatus("通話が終了しました。「続きから接続」で再開できます。");
+    showIdleControls();
     stopBtn.disabled = true;
     muteBtn.disabled = true;
   });
@@ -76,6 +181,38 @@ async function startCall() {
   // マイクの取得と WebRTC 接続は SDK が行う
   await anamClient.streamToVideoElement("persona-video");
   await startCamera();
+}
+
+function renderNews(news) {
+  $("news-panel").hidden = false;
+  const asOf = new Date(news.as_of).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
+  $("news-heading").textContent = `SlashdotのITセキュリティ・AIの話題（${asOf} 日本時間・過去24時間）`;
+  const summary = $("news-summary");
+  summary.replaceChildren();
+  news.items.forEach((item, index) => {
+    const paragraph = document.createElement("p");
+    paragraph.textContent = item.summary;
+    const link = document.createElement("a");
+    link.href = item.source.url;
+    link.textContent = `[${index + 1}]`;
+    link.title = item.source.title;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    paragraph.append(" ", link);
+    summary.append(paragraph);
+  });
+  $("news-sources").replaceChildren(
+    ...news.items.map(({ source }, index) => {
+      const li = document.createElement("li");
+      const link = document.createElement("a");
+      link.href = source.url;
+      link.textContent = `[${index + 1}] ${source.publisher}：${source.title}`;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      li.append(link);
+      return li;
+    }),
+  );
 }
 
 async function startCamera() {
@@ -198,12 +335,35 @@ showSelf.addEventListener("change", () => {
   } catch {}
 });
 
-startBtn.addEventListener("click", () => startCall().catch((err) => {
+prepareBtn.addEventListener("click", () => prepareConnection().catch((err) => {
   console.error(err);
+  showIdleControls();
+  setStatus(`準備に失敗しました: ${err.message}`);
+}));
+
+providerSelect.addEventListener("change", () => {
+  if (!preparationId) return;
+  preparationId = null;
+  rememberPreparation(null);
+  $("news-panel").hidden = true;
+  showIdleControls();
+  setStatus("LLMを変更しました。「接続準備」を押してください。");
+});
+
+startBtn.addEventListener("click", () => startCall().catch(async (err) => {
+  console.error(err);
+  const client = anamClient;
+  anamClient = null;
+  if (client) {
+    try { await client.stopStreaming(); } catch {}
+  }
+  stopCamera();
+  stopBtn.disabled = true;
+  muteBtn.disabled = true;
   // Anam SDK のエラーは、サーバーが返した具体的な理由を details.cause に持つ
   const cause = err.details?.cause;
   setStatus(`エラー: ${err.message}${cause ? `（${typeof cause === "string" ? cause : JSON.stringify(cause)}）` : ""}`);
-  startBtn.disabled = false;
+  showIdleControls();
 }));
 
 stopBtn.addEventListener("click", () => anamClient?.stopStreaming());

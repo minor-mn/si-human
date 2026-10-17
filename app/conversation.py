@@ -5,6 +5,7 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
+from app.comments import asks_for_comments
 from app.llm import LLM, Part, Turn
 
 log = logging.getLogger(__name__)
@@ -26,6 +27,8 @@ class Conversation:
     # 前のターンが一言も返さずに遮られた場合、そのユーザー発話を次のターンに繰り越す
     pending_user_parts: list[Part] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # 接続準備で取得して保管するだけにし、質問されるまでLLMには渡さない。
+    pending_comment_context: str = ""
 
     async def reply(self, user_text: str, image_b64: str | None) -> AsyncIterator[str]:
         """ユーザー発話に対する返答をテキスト断片として流す。
@@ -34,6 +37,9 @@ class Conversation:
         その場合も言いかけた部分までを履歴に残す。
         """
         async with self.lock:
+            if self.pending_comment_context and asks_for_comments(user_text):
+                self.system_prompt += self.pending_comment_context
+                self.pending_comment_context = ""
             parts = self.pending_user_parts
             self.pending_user_parts = []
             if image_b64:

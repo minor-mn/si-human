@@ -11,3 +11,4 @@ logs/*
 !logs/.keep
 run/*
 !run/.keep
+/data/preparations/
