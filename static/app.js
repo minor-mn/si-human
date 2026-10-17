@@ -17,7 +17,7 @@ let muted = false;
 let llmName = "";
 
 async function loadConfig() {
-  const config = await (await fetch("/api/config")).json();
+  const config = await (await fetch("api/config")).json();
   providerSelect.replaceChildren(
     ...config.providers.map((p) => new Option(p === "claude" ? "Claude" : "OpenAI", p)),
   );
@@ -32,7 +32,7 @@ async function startCall() {
   startBtn.disabled = true;
   setStatus("接続中…");
 
-  const res = await fetch("/api/session", {
+  const res = await fetch("api/session", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ conversation_id: conversationId, provider: providerSelect.value }),
@@ -127,7 +127,7 @@ async function respond(userText) {
   let firstChunk = true;
 
   try {
-    const res = await fetch("/api/chat", {
+    const res = await fetch("api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ conversation_id: conversationId, text: userText, image_b64: captureFrame() }),
