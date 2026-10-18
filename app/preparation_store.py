@@ -17,6 +17,7 @@ from app.news import NewsBriefing
 
 log = logging.getLogger(__name__)
 ID_PATTERN = r"^[A-Za-z0-9_-]{16,128}$"
+MAX_PREPARATION_BYTES = 16 * 1024 * 1024
 
 
 class StoredPreparation(BaseModel):
@@ -48,6 +49,8 @@ class PreparationStore:
                 json.dump(preparation.model_dump(mode="json"), handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
                 handle.flush()
+                if handle.tell() > MAX_PREPARATION_BYTES:
+                    raise OSError("準備データが保存可能なサイズを超えました")
                 os.fsync(handle.fileno())
             os.replace(temporary, path)
         finally:
@@ -60,8 +63,8 @@ class PreparationStore:
         path = self.directory / f"{preparation_id}.json"
         try:
             with path.open("rb") as handle:
-                data = handle.read(2_000_001)
-            if len(data) > 2_000_000:
+                data = handle.read(MAX_PREPARATION_BYTES + 1)
+            if len(data) > MAX_PREPARATION_BYTES:
                 raise ValueError("準備ファイルが大きすぎます")
             preparation = StoredPreparation.model_validate_json(data)
             if preparation.preparation_id != preparation_id:

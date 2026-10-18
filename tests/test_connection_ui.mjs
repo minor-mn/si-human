@@ -72,7 +72,7 @@ async function harness(options = {}) {
         } else {
           data = {
             preparation_id: decodeURIComponent(path.split("/").at(-1)),
-            provider: options.restoredProvider || "openai", news: null, warnings: [],
+            provider: options.restoredProvider || "openai", news: options.news || null, warnings: [],
           };
         }
       } else if (path === "api/prepare") {
@@ -80,7 +80,7 @@ async function harness(options = {}) {
           status = 503;
           data = { detail: "話題を準備できませんでした。" };
         } else {
-          data = { preparation_id: "prepared", news: null, warnings: [] };
+          data = { preparation_id: "prepared", news: options.news || null, warnings: [] };
         }
       } else if (path === "api/session") {
         if (state.sessionError) {
@@ -138,6 +138,21 @@ test("preparation completes before a separate click can connect", async () => {
   assert.deepEqual(ui.state.greetings, ["準備した話題です。"]);
   assert.equal(ui.element("prepare-btn").disabled, true);
   assert.equal(ui.element("stop-btn").disabled, false);
+});
+
+test("all prepared topics beyond the opening are shown with their source links", async () => {
+  const items = Array.from({ length: 7 }, (_, index) => ({
+    summary: `話題${index + 1}です。`,
+    source: { title: `Report ${index}`, publisher: "Full Disclosure", url: `https://seclists.org/fulldisclosure/2026/Oct/${index}` },
+  }));
+  const ui = await harness({ news: { as_of: "2026-10-18T04:00:00+09:00", items } });
+  await ui.click("prepare-btn");
+  assert.equal(ui.element("news-summary").children.length, 7);
+  assert.equal(ui.element("news-sources").children.length, 7);
+  assert.equal(ui.element("news-summary").children[6].textContent, "話題7です。");
+  assert.equal(ui.element("news-sources").children[6].children[0].href, items[6].source.url);
+  assert.match(ui.element("news-heading").textContent, /7件/);
+  assert.equal(ui.state.sdkCalls, 0);
 });
 
 test("failed preparation keeps connection hidden and allows another preparation", async () => {

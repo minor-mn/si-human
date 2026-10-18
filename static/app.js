@@ -186,7 +186,7 @@ async function startCall() {
 function renderNews(news) {
   $("news-panel").hidden = false;
   const asOf = new Date(news.as_of).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
-  $("news-heading").textContent = `SlashdotのITセキュリティ・AIの話題（${asOf} 日本時間・過去24時間）`;
+  $("news-heading").textContent = `ITセキュリティ・AIの話題 ${news.items.length}件（${asOf} 日本時間・過去24時間）`;
   const summary = $("news-summary");
   summary.replaceChildren();
   news.items.forEach((item, index) => {

@@ -1,12 +1,13 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import httpx
 
 from app.comments import (
     Comment, ThreadComments, _cache, _fetch_thread, _locks,
-    asks_for_comments, comment_context, parse_comments, valid_slashdot_url,
+    asks_for_comments, comment_context, fetch_threads, parse_comments, valid_slashdot_url,
 )
 from app.conversation import Conversation
 from app.news import NewsItem, Source
@@ -100,6 +101,22 @@ class CommentFetchTests(unittest.IsolatedAsyncioTestCase):
             result = await _fetch_thread(client, item)
         self.assertEqual(result.status, "unavailable")
         handler.assert_not_called()
+
+    async def test_deadline_keeps_finished_threads_and_marks_pending_topics(self):
+        other = NewsItem("別の話題です。", Source("Slow", "https://seclists.org/fulldisclosure/2026/Oct/1", "Full Disclosure", THREAD.fetched_at))
+        async def fetch(client, item):
+            if item is ITEM:
+                return THREAD
+            await asyncio.Event().wait()
+        wait = asyncio.wait
+        async def short_wait(tasks, timeout):
+            return await wait(tasks, timeout=0.01)
+        with patch("app.comments._fetch_thread", side_effect=fetch), patch("app.comments.asyncio.wait", side_effect=short_wait):
+            results = await fetch_threads([ITEM, other])
+        self.assertEqual(len(results), 2)
+        self.assertIs(results[0], THREAD)
+        self.assertEqual(results[1].status, "unavailable")
+        self.assertEqual(results[1].url, other.source.url)
 
 
 class ConversationCommentTests(unittest.IsolatedAsyncioTestCase):

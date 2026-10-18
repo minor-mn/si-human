@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.comments import Comment, ThreadComments
-from app.news import JST, NewsBriefing, NewsItem, Source
+from app.news import JST, Article, NewsBriefing, NewsItem, Source
 from app.preparation_store import PreparationStore, StoredPreparation
 
 
@@ -63,10 +63,16 @@ class PreparationStoreTests(unittest.TestCase):
         self.store.save(self.preparation)
         data = json.loads(self.path.read_text(encoding="utf-8"))
         del data["news"]["items"][0]["article_summary"]
+        del data["news"]["articles"]
+        del data["threads"][0]["kind"]
+        del data["threads"][0]["partial"]
         self.path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         restored = self.store.load(PREPARATION_ID)
         self.assertEqual(restored.news.items[0].article_summary, "")
         self.assertEqual(restored.news.text, self.preparation.news.text)
+        self.assertEqual(restored.news.articles, [])
+        self.assertEqual(restored.threads[0].kind, "comments")
+        self.assertFalse(restored.threads[0].partial)
 
     def test_failed_replacement_preserves_previous_json_and_removes_temporary_file(self):
         self.store.save(self.preparation)
@@ -100,7 +106,21 @@ class PreparationStoreTests(unittest.TestCase):
 
     def test_oversized_file_is_rejected_without_modifying_it(self):
         self.directory.mkdir()
-        self.path.write_bytes(b" " * 2_000_001)
-        with self.assertLogs("app.preparation_store", level="WARNING"):
+        self.path.write_bytes(b" " * 1025)
+        with patch("app.preparation_store.MAX_PREPARATION_BYTES", 1024), self.assertLogs("app.preparation_store", level="WARNING"):
             self.assertIsNone(self.store.load(PREPARATION_ID))
-        self.assertEqual(self.path.stat().st_size, 2_000_001)
+        self.assertEqual(self.path.stat().st_size, 1025)
+
+    def test_archives_larger_than_the_previous_two_megabyte_limit_are_restorable(self):
+        self.preparation.news.articles = [Article("Archive", "x" * 2_100_000, "https://example.com/archive", "test", self.now)]
+        self.store.save(self.preparation)
+        restored = self.store.load(PREPARATION_ID)
+        self.assertEqual(restored.news.articles, self.preparation.news.articles)
+
+    def test_unrestorable_size_is_rejected_before_replacing_the_previous_file(self):
+        self.store.save(self.preparation)
+        previous = self.path.read_bytes()
+        with patch("app.preparation_store.MAX_PREPARATION_BYTES", len(previous)):
+            with self.assertRaises(OSError):
+                self.store.save(self.preparation.model_copy(update={"warnings": ["x" * 1000]}))
+        self.assertEqual(self.path.read_bytes(), previous)

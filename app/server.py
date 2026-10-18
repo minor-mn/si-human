@@ -139,12 +139,12 @@ def _load_prepared(preparation_id: str | None, missing_status: int = 409) -> Pre
     return prepared
 
 
-@app.get("/api/preparations/{preparation_id}")
+@app.get("/api/preparations/{preparation_id}", response_model_exclude={"news": {"articles"}})
 async def get_preparation(preparation_id: str) -> PreparationResponse:
     return _preparation_response(preparation_id, _load_prepared(preparation_id, missing_status=404))
 
 
-@app.post("/api/prepare")
+@app.post("/api/prepare", response_model_exclude={"news": {"articles"}})
 async def prepare_connection(req: PreparationRequest) -> PreparationResponse:
     provider = req.provider or default_provider()
     llm = get_llm(provider)
@@ -158,13 +158,12 @@ async def prepare_connection(req: PreparationRequest) -> PreparationResponse:
         try:
             async with asyncio.timeout(10):
                 threads = await fetch_threads(briefing.items)
-                unavailable = sum(thread.status == "unavailable" for thread in threads)
+                unavailable = sum(thread.status == "unavailable" or thread.partial for thread in threads)
                 if unavailable:
-                    warnings.append("スレッドのコメントを取得できませんでした。" if unavailable == len(threads)
-                                    else "一部のスレッドのコメントを取得できませんでした。")
+                    warnings.append("スレッドのコメント・返信の一部または全部を取得できませんでした。")
         except Exception as exc:
             logging.getLogger(__name__).warning("コメントの事前取得に失敗しました: %s", exc)
-            warnings.append("コメントを取得できませんでした。話題の準備はできています。")
+            warnings.append("コメント・返信を取得できませんでした。話題の準備はできています。")
 
     preparation_id = secrets.token_urlsafe(16)
     stored = StoredPreparation(
@@ -194,7 +193,7 @@ async def _session_token() -> str:
     )
 
 
-@app.post("/api/session")
+@app.post("/api/session", response_model_exclude={"news": {"articles"}})
 async def create_session(req: SessionRequest) -> SessionResponse:
     if req.conversation_id and req.preparation_id:
         raise HTTPException(400, "準備データと再接続する会話を同時に指定できません。")
