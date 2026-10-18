@@ -31,14 +31,14 @@ async function loadConfig() {
   try { savedId = localStorage.getItem(PREPARATION_KEY); } catch {}
   if (!savedId) return;
   prepareBtn.disabled = true;
-  setStatus("保存した準備データを読み込んでいます…");
+  setStatus("準備済みデータを読み込んでいます…");
   try {
     const prepared = await readJson(await fetch(`api/preparations/${encodeURIComponent(savedId)}`));
     usePreparedData(prepared, true);
   } catch (error) {
     if (error.status === 404 || error.status === 409) rememberPreparation(null);
     showIdleControls();
-    setStatus(`保存した準備データを読み込めませんでした: ${error.message}`);
+    setStatus(`準備済みデータを読み込めませんでした: ${error.message}`);
   }
 }
 
@@ -71,7 +71,7 @@ function usePreparedData(prepared, restored = false) {
   if (prepared.news) renderNews(prepared.news);
   showIdleControls();
   const warning = prepared.warnings?.length ? ` ${prepared.warnings.join(" ")}` : "";
-  setStatus(`${restored ? "保存した準備データを復元しました。" : "準備ができました。"}「接続する」を押してください。${warning}`);
+  setStatus(`${restored ? "準備済みデータを復元しました。" : "準備ができました。"}「接続する」を押してください。${warning}`);
 }
 
 async function readJson(response) {
@@ -107,7 +107,7 @@ async function prepareConnection() {
   startBtn.disabled = true;
   providerSelect.disabled = true;
   $("news-panel").hidden = true;
-  setStatus("話題とコメントを準備しています…");
+  setStatus("vuln-watchから話題を読み込んでいます…");
 
   const prepared = await postJson("api/prepare", { provider: providerSelect.value });
   usePreparedData(prepared);
@@ -187,7 +187,10 @@ function renderNews(news) {
   $("news-panel").hidden = false;
   const asOf = new Date(news.as_of).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
   const period = news.selection_policy === "per_source_24h_or_latest_5"
-    ? "24時間以内／不足時は取得元ごとに最新5件" : "過去24時間";
+    ? "24時間以内／不足時は取得元ごとに最新5件"
+    : news.selection_policy === "per_source_window"
+      ? `過去${news.hours ?? 24}時間${news.limit != null ? `／取得元ごとに最大${news.limit}件` : ""}`
+      : "過去24時間";
   $("news-heading").textContent = `ITセキュリティ・AIの話題 ${news.items.length}件（${asOf} 日本時間・${period}）`;
   const summary = $("news-summary");
   summary.replaceChildren();

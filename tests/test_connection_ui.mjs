@@ -168,6 +168,17 @@ test("fallback policy and original publication date are shown for old posts", as
   assert.match(source.textContent, /16:43:38/);
 });
 
+test("explicit API hours and per-source limit are shown without the legacy fallback", async () => {
+  const ui = await harness({ news: {
+    as_of: "2026-10-18T04:00:00+09:00", selection_policy: "per_source_window", hours: 48, limit: 10, items: [],
+  } });
+  await ui.click("prepare-btn");
+  const heading = ui.element("news-heading").textContent;
+  assert.match(heading, /過去48時間/);
+  assert.match(heading, /取得元ごとに最大10件/);
+  assert.doesNotMatch(heading, /不足時/);
+});
+
 test("failed preparation keeps connection hidden and allows another preparation", async () => {
   const ui = await harness();
   ui.state.preparationFails = true;
@@ -243,7 +254,7 @@ test("a failed avatar connection can retry and still read the prepared opening",
   assert.deepEqual(ui.state.greetings, ["準備した話題です。"]);
 });
 
-test("reloading restores prepared JSON by ID without preparing or connecting again", async () => {
+test("reloading restores in-memory preparation by ID without preparing or connecting again", async () => {
   const first = await harness();
   await first.click("prepare-btn");
   assert.equal(first.storage.get("si-human.preparationId"), "prepared");

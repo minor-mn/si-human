@@ -8,7 +8,6 @@ import logging
 import os
 import secrets
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -21,12 +20,12 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 from app import anam  # noqa: E402
-from app.comments import comment_context, fetch_threads  # noqa: E402
+from app.comments import ThreadComments, comment_context  # noqa: E402
 from app.conversation import Conversation  # noqa: E402
 from app.llm import PROVIDERS, Provider, default_provider, get_llm  # noqa: E402
-from app.news import JST, NewsBriefing, get_briefing  # noqa: E402
+from app.news import NewsBriefing  # noqa: E402
+from app.vuln_watch import BriefingUnavailable, fetch_briefing  # noqa: E402
 from app.persona import build_system_prompt, load_persona  # noqa: E402
-from app.preparation_store import PreparationStore, StoredPreparation  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 
@@ -35,7 +34,6 @@ persona = load_persona(ROOT / os.environ.get("PERSONA_FILE", "persona.yaml"))
 system_prompt = build_system_prompt(persona)
 max_session_seconds = int(os.environ.get("ANAM_MAX_SESSION_SECONDS", "600"))
 news_on_connect = os.environ.get("NEWS_ON_CONNECT", "true").lower() in {"true", "1", "yes"}
-preparation_store = PreparationStore(ROOT / os.environ.get("PREPARATION_DIR", "data/preparations"))
 
 # ローカルで 1 人が使う前提なのでメモリ上に置く（サーバー再起動で履歴は消える）
 conversations: dict[str, Conversation] = {}
@@ -47,7 +45,7 @@ class PreparedConversation:
     provider: Provider
     greeting: str
     news: NewsBriefing | None
-    stored: StoredPreparation
+    warnings: list[str]
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -97,16 +95,16 @@ class ChatRequest(BaseModel):
     image_b64: str | None = None  # カメラ映像の JPEG（base64、data: プレフィックスなし）
 
 
-def _make_prepared(stored: StoredPreparation) -> PreparedConversation:
-    llm = get_llm(stored.provider)
+def _make_prepared(provider: Provider, briefing: NewsBriefing | None, threads: list[ThreadComments], warnings: list[str]) -> PreparedConversation:
+    llm = get_llm(provider)
     conversation = Conversation(id=secrets.token_urlsafe(16), system_prompt=system_prompt, llm=llm)
     greeting = persona.greeting
-    if stored.news:
-        greeting = "\n".join(part for part in (persona.greeting, stored.news.text) if part)
-        conversation.system_prompt += stored.news.conversation_context()
-    if stored.threads:
-        conversation.pending_comment_context = comment_context(stored.threads)
-    return PreparedConversation(conversation, stored.provider, greeting, stored.news, stored)
+    if briefing:
+        greeting = "\n".join(part for part in (persona.greeting, briefing.text) if part)
+        conversation.system_prompt += briefing.conversation_context()
+    if threads:
+        conversation.pending_comment_context = comment_context(threads)
+    return PreparedConversation(conversation, provider, greeting, briefing, warnings)
 
 
 def _preparation_response(preparation_id: str, prepared: PreparedConversation) -> PreparationResponse:
@@ -116,7 +114,7 @@ def _preparation_response(preparation_id: str, prepared: PreparedConversation) -
         provider=prepared.provider,
         llm=prepared.conversation.llm.name,
         news=prepared.news,
-        warnings=prepared.stored.warnings,
+        warnings=prepared.warnings,
     )
 
 
@@ -125,61 +123,28 @@ def _load_prepared(preparation_id: str | None, missing_status: int = 409) -> Pre
         raise HTTPException(missing_status, "接続準備が必要です。「接続準備」を押してください。")
     prepared = preparations.get(preparation_id)
     if prepared is None:
-        try:
-            stored = preparation_store.load(preparation_id)
-        except OSError as exc:
-            logging.getLogger(__name__).error("準備ファイルの読み込みに失敗しました: %s", exc)
-            raise HTTPException(503, "保存した準備データを読み込めませんでした。") from exc
-        if stored is None:
-            raise HTTPException(missing_status, "準備データが見つかりません。「接続準備」を押してください。")
-        if stored.used:
-            raise HTTPException(409, "この準備データはすでに接続に使用されています。")
-        prepared = _make_prepared(stored)
-        preparations[preparation_id] = prepared
+        raise HTTPException(missing_status, "準備データが見つかりません。「接続準備」を押してください。")
     return prepared
 
 
-@app.get("/api/preparations/{preparation_id}", response_model_exclude={"news": {"articles"}})
+@app.get("/api/preparations/{preparation_id}")
 async def get_preparation(preparation_id: str) -> PreparationResponse:
     return _preparation_response(preparation_id, _load_prepared(preparation_id, missing_status=404))
 
 
-@app.post("/api/prepare", response_model_exclude={"news": {"articles"}})
+@app.post("/api/prepare")
 async def prepare_connection(req: PreparationRequest) -> PreparationResponse:
     provider = req.provider or default_provider()
-    llm = get_llm(provider)
-    briefing = await get_briefing(llm) if news_on_connect else None
-    if news_on_connect and briefing is None:
-        raise HTTPException(503, "話題を準備できませんでした。時間を置いて準備し直してください。")
-
-    warnings: list[str] = []
-    threads = []
-    if briefing:
+    briefing, threads, warnings = None, [], []
+    if news_on_connect:
         try:
-            async with asyncio.timeout(10):
-                threads = await fetch_threads(briefing.items)
-                unavailable = sum(thread.status == "unavailable" or thread.partial for thread in threads)
-                if unavailable:
-                    warnings.append("スレッドのコメント・返信の一部または全部を取得できませんでした。")
-        except Exception as exc:
-            logging.getLogger(__name__).warning("コメントの事前取得に失敗しました: %s", exc)
-            warnings.append("コメント・返信を取得できませんでした。話題の準備はできています。")
-
+            result = await fetch_briefing()
+        except BriefingUnavailable as exc:
+            logging.getLogger(__name__).warning("vuln-watchの読み込みに失敗しました: %s", exc)
+            raise HTTPException(503, "vuln-watchから話題を読み込めませんでした。接続先を確認して準備し直してください。") from exc
+        briefing, threads, warnings = result.news, result.threads, result.warnings
     preparation_id = secrets.token_urlsafe(16)
-    stored = StoredPreparation(
-        preparation_id=preparation_id,
-        prepared_at=datetime.now(JST),
-        provider=provider,
-        news=briefing,
-        threads=threads,
-        warnings=warnings,
-    )
-    try:
-        preparation_store.save(stored)
-    except OSError as exc:
-        logging.getLogger(__name__).error("準備ファイルの保存に失敗しました: %s", exc)
-        raise HTTPException(503, "準備データをファイルに保存できませんでした。保存先を確認してください。") from exc
-    prepared = _make_prepared(stored)
+    prepared = _make_prepared(provider, briefing, threads, warnings)
     preparations[preparation_id] = prepared
     return _preparation_response(preparation_id, prepared)
 
@@ -193,7 +158,7 @@ async def _session_token() -> str:
     )
 
 
-@app.post("/api/session", response_model_exclude={"news": {"articles"}})
+@app.post("/api/session")
 async def create_session(req: SessionRequest) -> SessionResponse:
     if req.conversation_id and req.preparation_id:
         raise HTTPException(400, "準備データと再接続する会話を同時に指定できません。")
@@ -215,11 +180,6 @@ async def create_session(req: SessionRequest) -> SessionResponse:
                 raise HTTPException(409, "LLMが変更されています。接続準備からやり直してください。")
             # この段階では外部記事の取得やLLMによる要約は行わない。
             token = await _session_token()
-            try:
-                preparation_store.save(prepared.stored.model_copy(update={"used": True}))
-            except OSError as exc:
-                logging.getLogger(__name__).error("準備ファイルの接続状態を保存できませんでした: %s", exc)
-                raise HTTPException(503, "接続状態をファイルに保存できませんでした。保存先を確認してください。") from exc
             conversation = prepared.conversation
             llm = conversation.llm
             greeting, briefing = prepared.greeting, prepared.news
