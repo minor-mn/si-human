@@ -305,14 +305,14 @@ async function respond(userText) {
 function renderTranscript(messages) {
   const list = $("transcript");
   list.replaceChildren(
-    ...messages.map((m) => {
+    ...[...messages].reverse().map((m) => {
       const li = document.createElement("li");
       li.className = m.role;
       li.textContent = m.content + (m.interrupted ? "（中断）" : "");
       return li;
     }),
   );
-  list.parentElement.scrollTop = list.parentElement.scrollHeight;
+  list.parentElement.scrollTop = 0;
 }
 
 function logLatency(ms) {
