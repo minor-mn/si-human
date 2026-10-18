@@ -29,7 +29,7 @@ class PreparationStoreTests(unittest.TestCase):
             provider="openai",
             news=NewsBriefing(
                 "2026-10-17T04:00:00+09:00", self.now.isoformat(), "日本語の要約です。",
-                [NewsItem("日本語の要約です。", source)],
+                [NewsItem("日本語の要約です。", source, "質問に答えるための記事の詳細です。")],
             ),
             threads=[ThreadComments(
                 source.title, source.url, self.now.isoformat(), "available",
@@ -52,11 +52,21 @@ class PreparationStoreTests(unittest.TestCase):
         self.assertFalse({"session_token", "api_key", "system_prompt", "turns"} & data.keys())
         restored = self.store.load(PREPARATION_ID)
         self.assertEqual(restored.news.items[0].source.publisher, "Slashdot")
+        self.assertEqual(restored.news.items[0].article_summary, "質問に答えるための記事の詳細です。")
         self.assertEqual(restored.threads[0].comments[0].score, 5)
         self.assertTrue(restored.threads[0].comments[0].truncated)
         self.assertEqual(restored.prepared_at, self.now)
         if os.name == "posix":
             self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+
+    def test_previously_saved_topics_without_article_excerpt_still_load(self):
+        self.store.save(self.preparation)
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        del data["news"]["items"][0]["article_summary"]
+        self.path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        restored = self.store.load(PREPARATION_ID)
+        self.assertEqual(restored.news.items[0].article_summary, "")
+        self.assertEqual(restored.news.text, self.preparation.news.text)
 
     def test_failed_replacement_preserves_previous_json_and_removes_temporary_file(self):
         self.store.save(self.preparation)

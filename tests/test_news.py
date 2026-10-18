@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 
 from app.news import (
-    JST, Article, NewsBriefing, NewsItem, build_news_prompt,
+    JST, MAX_SUMMARY_CHARS, Article, NewsBriefing, NewsItem, build_news_prompt,
     _feed_cache, _feed_locks, _fetch_feed, fetch_articles, get_briefing, parse_feed, parse_selection,
 )
 from app.persona import Persona
@@ -188,6 +188,32 @@ class NewsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(selected[0].source, SOURCE)
         self.assertEqual(selected[0].summary, "要約。")
 
+    def test_long_attributed_or_unfinished_summaries_are_not_spoken(self):
+        for summary in (
+            "Slashdotでは、LinuxがAI生成コードの受け入れ方針を変更しました。",
+            "Slashdotによると、教育機関から学生の個人情報が流出しました。",
+            "スラッシュドットでは、AIの新モデルが公開されました。",
+            "あ" * MAX_SUMMARY_CHARS + "。",
+            "逆解析サイトが閉鎖されます。管理者は、",
+            "管理者は、",
+            "AIの新モデルが公開されました。詳しい性能も紹介します。",
+        ):
+            with self.subTest(summary=summary), self.assertRaises(ValueError):
+                parse_selection(json.dumps({"items": [{"id": 1, "summary": summary}]}), [ARTICLE])
+
+    def test_short_summary_retains_article_details_for_followup_questions(self):
+        article = Article(
+            "Linux changes AI code policy", "メンテナー会議で決まった方針変更の詳細。",
+            SOURCE.url, "Slashdot", NOW, "discussion",
+        )
+        summary = "LinuxがAI生成コードの受け入れ方針を変更しました。"
+        items = parse_selection(json.dumps({"items": [{"id": 1, "summary": summary}]}), [article])
+        briefing = NewsBriefing(BRIEFING.since, BRIEFING.as_of, summary, items)
+        self.assertEqual(items[0].summary, summary)
+        self.assertEqual(items[0].article_summary, article.summary)
+        self.assertIn(article.summary, briefing.conversation_context())
+        self.assertNotIn(article.summary, briefing.text)
+
     def test_four_trends_are_allowed_but_five_are_rejected(self):
         articles = [Article(f"記事{i}", "要約", f"https://example.com/{i}", "test", NOW) for i in range(5)]
         selections = [{"id": i, "summary": "話題です。"} for i in range(1, 6)]
@@ -203,8 +229,26 @@ class NewsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(briefing.since, BRIEFING.since)
         self.assertEqual(briefing.as_of, BRIEFING.as_of)
         self.assertEqual(briefing.items[0].source, SOURCE)
-        self.assertIn("記事の要約。", briefing.text)
+        self.assertEqual(briefing.text, "記事の要約。\nどの話題が気になりますか？")
         self.assertNotIn(SOURCE.url, briefing.text)
+
+    async def test_generation_repairs_verbose_opening_before_preparation_completes(self):
+        class RepairLLM(FakeLLM):
+            turn_counts = []
+
+            async def stream(self, system, turns, cache_key):
+                self.turn_counts.append(len(turns))
+                summary = "Slashdotでは、AIの新モデルが公開されました。" if not self.calls else "AIの新モデルが公開されました。"
+                self.payload = json.dumps({"items": [{"id": 1, "summary": summary}]})
+                async for chunk in super().stream(system, turns, cache_key):
+                    yield chunk
+
+        llm = RepairLLM()
+        with patch("app.news.fetch_articles", AsyncMock(return_value=[ARTICLE])):
+            briefing = await get_briefing(llm)
+        self.assertEqual(llm.calls, 2)
+        self.assertEqual(llm.turn_counts, [1, 3])
+        self.assertEqual(briefing.text, "AIの新モデルが公開されました。\nどの話題が気になりますか？")
 
     async def test_missing_feed_does_not_call_llm(self):
         llm = FakeLLM()
