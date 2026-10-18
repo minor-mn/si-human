@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 
 from app.news import (
-    JST, MAX_SUMMARY_CHARS, Article, NewsBriefing, NewsItem, build_news_prompt,
+    JST, MAX_SUMMARY_CHARS, SELECTION_POLICY, Article, NewsBriefing, NewsItem, build_news_prompt,
     _feed_cache, _feed_locks, _fetch_feed, fetch_articles, get_briefing, parse_feed, parse_selection,
 )
 from app.persona import Persona
@@ -61,6 +61,9 @@ class NewsTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         _feed_cache.clear()
         _feed_locks.clear()
+        patcher = patch("app.news._github_articles", AsyncMock(return_value=[]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_period_is_rolling_24_hours_in_japan(self):
         prompt = build_news_prompt(datetime(2026, 10, 17, 15, 30, tzinfo=timezone.utc), [ARTICLE])
@@ -68,8 +71,11 @@ class NewsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2026-10-17T00:30:00+09:00", prompt)
         self.assertIn("日付の「今日」ではなく", prompt)
 
-    def test_feed_excludes_old_future_and_unparseable_dates(self):
+    def test_five_recent_posts_exclude_old_future_and_unparseable_dates(self):
         data = feed([
+            ("新着1", "https://example.com/new1", format_datetime(NOW)),
+            ("新着2", "https://example.com/new2", format_datetime(NOW - timedelta(minutes=1))),
+            ("新着3", "https://example.com/new3", format_datetime(NOW - timedelta(minutes=2))),
             ("境界の24時間前", "https://example.com/edge", format_datetime(NOW - timedelta(hours=24))),
             ("日付変更前", "https://example.com/yesterday", format_datetime(NOW - timedelta(hours=1))),
             ("古い記事", "https://example.com/old", format_datetime(NOW - timedelta(hours=24, seconds=1))),
@@ -78,8 +84,32 @@ class NewsTests(unittest.IsolatedAsyncioTestCase):
             ("時差不明", "https://example.com/naive", "Sun, 18 Oct 2026 00:00:00"),
         ])
         articles = parse_feed(data, "報道機関", NOW)
-        self.assertEqual([article.title for article in articles], ["境界の24時間前", "日付変更前"])
+        self.assertEqual([article.title for article in articles], ["新着1", "新着2", "新着3", "日付変更前", "境界の24時間前"])
         self.assertEqual(articles[0].summary, "要約")
+
+    def test_fewer_than_five_recent_posts_use_latest_five_without_an_age_limit(self):
+        for recent_count in (0, 2, 4, 5, 8):
+            recent = [(f"Recent-{i}", f"https://example.com/recent/{i}", format_datetime(NOW - timedelta(minutes=i))) for i in range(recent_count)]
+            old = [(f"Old-{i}", f"https://example.com/old/{i}", format_datetime(NOW - timedelta(days=3650 + i))) for i in range(7)]
+            articles = parse_feed(feed(list(reversed(recent + old))), "test", NOW)
+            expected = [entry[0] for entry in (recent if recent_count >= 5 else (recent + old)[:5])]
+            with self.subTest(recent_count=recent_count):
+                self.assertEqual([article.title for article in articles], expected)
+
+    def test_duplicate_urls_do_not_satisfy_the_five_post_threshold(self):
+        entries = [("Recent", "https://example.com/recent", format_datetime(NOW))] * 6
+        entries += [(f"Old-{i}", f"https://example.com/old/{i}", format_datetime(NOW - timedelta(days=7 + i))) for i in range(5)]
+        articles = parse_feed(feed(entries), "test", NOW)
+        self.assertEqual(len(articles), 5)
+        self.assertEqual(len({article.url for article in articles}), 5)
+        self.assertEqual([article.title for article in articles], ["Recent", "Old-0", "Old-1", "Old-2", "Old-3"])
+
+    def test_fewer_than_five_available_posts_do_not_use_future_or_unknown_dates(self):
+        entries = [("Old", "https://example.com/old", format_datetime(NOW - timedelta(days=100)))]
+        entries += [("Future", "https://example.com/future", format_datetime(NOW + timedelta(seconds=1))),
+                    ("Unknown", "https://example.com/unknown", "bad date")]
+        articles = parse_feed(feed(entries), "test", NOW)
+        self.assertEqual([article.title for article in articles], ["Old"])
 
     def test_feed_rejects_unsafe_links(self):
         data = feed([
@@ -105,10 +135,11 @@ class NewsTests(unittest.IsolatedAsyncioTestCase):
           <published>2026-10-10T12:00:00Z</published><updated>2026-10-17T15:00:00Z</updated>
         </entry></feed>'''
         articles = parse_feed(data, "コミュニティ", NOW, "discussion")
-        self.assertEqual(len(articles), 1)
+        self.assertEqual(len(articles), 2)
         self.assertEqual(articles[0].url, "https://example.com/posts/123/")
         self.assertEqual(articles[0].summary, "Post summary")
         self.assertEqual(articles[0].source().kind, "discussion")
+        self.assertEqual(articles[1].published_at, datetime(2026, 10, 10, 21, tzinfo=JST))
 
     def test_slashdot_atom_and_rdf_dates(self):
         feeds = (
@@ -127,13 +158,16 @@ class NewsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(articles[0].published_at, datetime(2026, 10, 17, 21, tzinfo=JST))
 
     async def test_cached_feed_is_filtered_again_at_connection_time(self):
-        data = feed([("記事", SOURCE.url, format_datetime(NOW - timedelta(hours=23, minutes=59)))])
+        entries = [("境界の投稿", SOURCE.url, format_datetime(NOW - timedelta(hours=23, minutes=59)))]
+        entries += [(f"Recent-{i}", f"https://example.com/{i}", format_datetime(NOW - timedelta(minutes=i))) for i in range(5)]
+        data = feed(entries)
         handler = Mock(return_value=httpx.Response(200, content=data))
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             first = await _fetch_feed(client, "test", "https://example.com/feed", NOW)
             second = await _fetch_feed(client, "test", "https://example.com/feed", NOW + timedelta(minutes=2))
-        self.assertEqual(len(first), 1)
-        self.assertEqual(second, [])
+        self.assertEqual(len(first), 6)
+        self.assertEqual(len(second), 5)
+        self.assertNotIn(SOURCE.url, [article.url for article in second])
         self.assertEqual(handler.call_count, 1)
 
     async def test_simultaneous_connections_do_not_repeat_feed_request(self):
@@ -183,8 +217,8 @@ class NewsTests(unittest.IsolatedAsyncioTestCase):
             ("Unexpected link", "https://example.com/", format_datetime(NOW)),
         ])
         articles = parse_feed(data, "Full Disclosure", NOW, "mailing_list")
-        self.assertEqual([article.url for article in articles], [url, url[:-1] + "3", url[:-1] + "4"])
-        self.assertEqual([article.kind for article in articles], ["mailing_list", "mailing_list_reply", "mailing_list_reply"])
+        self.assertEqual([article.url for article in articles], [url, url[:-1] + "3", url[:-1] + "4", url[:-1] + "2"])
+        self.assertEqual([article.kind for article in articles], ["mailing_list", "mailing_list_reply", "mailing_list_reply", "mailing_list"])
         self.assertEqual(articles[0].source().published_at, NOW.isoformat(timespec="seconds"))
 
     async def test_other_source_survives_an_empty_feed_or_a_fetch_failure(self):
@@ -198,6 +232,31 @@ class NewsTests(unittest.IsolatedAsyncioTestCase):
             with patch("app.news.httpx.AsyncClient", return_value=client):
                 articles = await fetch_articles(NOW)
             self.assertEqual([article.publisher for article in articles], ["Slashdot"])
+
+    async def test_fallback_is_applied_independently_for_each_source(self):
+        def respond(request):
+            if request.url.host == "rss.slashdot.org":
+                entries = [(f"AI-{i}", f"https://slashdot.org/story/{i}", format_datetime(NOW - timedelta(minutes=i))) for i in range(8)]
+            else:
+                entries = [(f"Report-{i}", f"https://seclists.org/fulldisclosure/2026/Oct/{i}", format_datetime(NOW - timedelta(days=3, minutes=i))) for i in range(9)]
+            return httpx.Response(200, content=feed(entries))
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        with patch("app.news.httpx.AsyncClient", return_value=client):
+            articles = await fetch_articles(NOW)
+        self.assertEqual(sum(article.publisher == "Slashdot" for article in articles), 8)
+        self.assertEqual(sum(article.publisher == "Full Disclosure" for article in articles), 5)
+
+    async def test_cached_feed_can_fall_back_to_old_posts_without_another_request(self):
+        entries = [("Boundary", "https://example.com/boundary", format_datetime(NOW - timedelta(hours=23, minutes=59)))]
+        entries += [(f"Recent-{i}", f"https://example.com/{i}", format_datetime(NOW - timedelta(minutes=i))) for i in range(3)]
+        entries += [("Old", "https://example.com/old", format_datetime(NOW - timedelta(days=7)))]
+        handler = Mock(return_value=httpx.Response(200, content=feed(entries)))
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await _fetch_feed(client, "test", "https://example.com/feed", NOW)
+            articles = await _fetch_feed(client, "test", "https://example.com/feed", NOW + timedelta(minutes=2))
+        self.assertEqual(len(articles), 5)
+        self.assertEqual(articles[-1].title, "Old")
+        self.assertEqual(handler.call_count, 1)
 
     async def test_all_posts_from_both_sources_are_kept_beyond_thirty(self):
         slashdot = [Article(f"AI {i}", "説明", f"https://slashdot.org/story/{i}", "Slashdot", NOW) for i in range(30)]
@@ -229,6 +288,7 @@ class NewsTests(unittest.IsolatedAsyncioTestCase):
             "Slashdotによると、教育機関から学生の個人情報が流出しました。",
             "スラッシュドットでは、AIの新モデルが公開されました。",
             "Full Disclosureによると、サーバーの脆弱性が報告されました。",
+            "GitHub Advisory Databaseによると、パッケージに脆弱性が見つかりました。",
             "あ" * MAX_SUMMARY_CHARS + "。",
             "逆解析サイトが閉鎖されます。管理者は、",
             "管理者は、",
@@ -319,6 +379,18 @@ class NewsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(briefing.items[0].source, SOURCE)
         self.assertEqual(briefing.text, "記事の要約。\nどの話題が気になりますか？")
         self.assertNotIn(SOURCE.url, briefing.text)
+
+    async def test_old_fallback_posts_keep_their_dates_in_briefing_and_conversation(self):
+        old = Article("Old report", "説明", "https://seclists.org/fulldisclosure/2026/Oct/1", "Full Disclosure", NOW - timedelta(days=7), "mailing_list")
+        with patch("app.news.fetch_articles", AsyncMock(return_value=[old])), patch("app.news.datetime") as clock:
+            clock.now.return_value = NOW
+            briefing = await get_briefing(FakeLLM())
+        self.assertEqual(briefing.selection_policy, SELECTION_POLICY)
+        self.assertEqual(briefing.since, old.published_at.isoformat(timespec="seconds"))
+        context = briefing.conversation_context()
+        self.assertIn(old.source().published_at, context)
+        self.assertIn("古い投稿を含む", context)
+        self.assertNotIn("までの24時間に入る話題", context)
 
     async def test_generation_repairs_verbose_opening_before_preparation_completes(self):
         class RepairLLM(FakeLLM):
@@ -513,6 +585,12 @@ class SessionNewsTests(unittest.IsolatedAsyncioTestCase):
         self.server.fetch_threads.return_value = [ThreadComments(SOURCE.title, SOURCE.url, BRIEFING.as_of, "unavailable")]
         prepared = await self.prepare()
         self.assertTrue(prepared["warnings"])
+
+    async def test_advisory_without_collected_comments_is_not_reported_as_fetch_failure(self):
+        url = "https://github.com/advisories/GHSA-abcd-1234-5678"
+        self.server.fetch_threads.return_value = [ThreadComments("Advisory", url, BRIEFING.as_of, "not_applicable", kind="advisory")]
+        prepared = await self.prepare()
+        self.assertEqual(prepared["warnings"], [])
 
     async def test_full_disclosure_replies_survive_json_restoration_without_early_disclosure(self):
         url = "https://seclists.org/fulldisclosure/2026/Oct/1"

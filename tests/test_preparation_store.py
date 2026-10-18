@@ -3,12 +3,12 @@ import os
 import stat
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from app.comments import Comment, ThreadComments
-from app.news import JST, Article, NewsBriefing, NewsItem, Source
+from app.news import JST, SELECTION_POLICY, Article, NewsBriefing, NewsItem, Source
 from app.preparation_store import PreparationStore, StoredPreparation
 
 
@@ -63,16 +63,48 @@ class PreparationStoreTests(unittest.TestCase):
         self.store.save(self.preparation)
         data = json.loads(self.path.read_text(encoding="utf-8"))
         del data["news"]["items"][0]["article_summary"]
+        del data["news"]["items"][0]["advisory"]
         del data["news"]["articles"]
+        del data["news"]["selection_policy"]
         del data["threads"][0]["kind"]
         del data["threads"][0]["partial"]
         self.path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         restored = self.store.load(PREPARATION_ID)
         self.assertEqual(restored.news.items[0].article_summary, "")
+        self.assertIsNone(restored.news.items[0].advisory)
         self.assertEqual(restored.news.text, self.preparation.news.text)
         self.assertEqual(restored.news.articles, [])
+        self.assertEqual(restored.news.selection_policy, "last_24_hours")
         self.assertEqual(restored.threads[0].kind, "comments")
         self.assertFalse(restored.threads[0].partial)
+
+    def test_fallback_policy_and_old_publication_dates_survive_restoration(self):
+        old = self.now - timedelta(days=7)
+        source = Source("Report", "https://seclists.org/fulldisclosure/2026/Oct/1", "Full Disclosure", old.isoformat(), "mailing_list")
+        self.preparation.news = NewsBriefing(
+            old.isoformat(), self.now.isoformat(), "脆弱性が報告されました。", [NewsItem("脆弱性が報告されました。", source)],
+            [Article(source.title, "説明", source.url, source.publisher, old, source.kind)], SELECTION_POLICY,
+        )
+        self.store.save(self.preparation)
+        restored = self.store.load(PREPARATION_ID)
+        self.assertEqual(restored.news.selection_policy, SELECTION_POLICY)
+        self.assertEqual(restored.news.since, old.isoformat())
+        self.assertEqual(restored.news.items[0].source.published_at, old.isoformat())
+        self.assertEqual(restored.news.articles[0].published_at, old)
+        self.assertIn("古い投稿を含む", restored.news.conversation_context())
+
+    def test_advisory_identifiers_and_fix_versions_survive_json_and_conversation_context(self):
+        source = Source("Package vulnerability", "https://github.com/advisories/GHSA-abcd-1234-5678", "GitHub Advisory Database", self.now.isoformat(), "advisory")
+        details = {"ghsa_id": "GHSA-abcd-1234-5678", "cve_id": "CVE-2026-12345", "severity": "high",
+                   "vulnerabilities": [{"package": {"ecosystem": "pip", "name": "sample"},
+                                        "vulnerable_version_range": "<1.2.3", "first_patched_version": "1.2.3"}]}
+        self.preparation.news.items = [NewsItem("パッケージに脆弱性が報告されました。", source, "説明", details)]
+        self.preparation.news.articles = [Article(source.title, "説明", source.url, source.publisher, self.now, "advisory", details)]
+        self.store.save(self.preparation)
+        restored = self.store.load(PREPARATION_ID)
+        self.assertEqual(restored.news.items[0].advisory, details)
+        self.assertEqual(restored.news.articles[0].advisory, details)
+        self.assertIn('"first_patched_version": "1.2.3"', restored.news.conversation_context())
 
     def test_failed_replacement_preserves_previous_json_and_removes_temporary_file(self):
         self.store.save(self.preparation)

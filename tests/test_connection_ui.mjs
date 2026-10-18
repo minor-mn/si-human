@@ -155,6 +155,19 @@ test("all prepared topics beyond the opening are shown with their source links",
   assert.equal(ui.state.sdkCalls, 0);
 });
 
+test("fallback policy and original publication date are shown for old posts", async () => {
+  const items = [{ summary: "脆弱性が報告されました。", source: {
+    title: "Report", publisher: "Full Disclosure", url: "https://seclists.org/fulldisclosure/2026/Oct/1",
+    published_at: "2026-10-15T07:43:38Z",
+  } }];
+  const ui = await harness({ news: { as_of: "2026-10-18T04:00:00+09:00", selection_policy: "per_source_24h_or_latest_5", items } });
+  await ui.click("prepare-btn");
+  assert.match(ui.element("news-heading").textContent, /取得元ごとに最新5件/);
+  const source = ui.element("news-sources").children[0].children[0];
+  assert.match(source.textContent, /2026\/10\/15/);
+  assert.match(source.textContent, /16:43:38/);
+});
+
 test("failed preparation keeps connection hidden and allows another preparation", async () => {
   const ui = await harness();
   ui.state.preparationFails = true;

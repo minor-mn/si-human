@@ -186,7 +186,9 @@ async function startCall() {
 function renderNews(news) {
   $("news-panel").hidden = false;
   const asOf = new Date(news.as_of).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
-  $("news-heading").textContent = `ITセキュリティ・AIの話題 ${news.items.length}件（${asOf} 日本時間・過去24時間）`;
+  const period = news.selection_policy === "per_source_24h_or_latest_5"
+    ? "24時間以内／不足時は取得元ごとに最新5件" : "過去24時間";
+  $("news-heading").textContent = `ITセキュリティ・AIの話題 ${news.items.length}件（${asOf} 日本時間・${period}）`;
   const summary = $("news-summary");
   summary.replaceChildren();
   news.items.forEach((item, index) => {
@@ -206,7 +208,9 @@ function renderNews(news) {
       const li = document.createElement("li");
       const link = document.createElement("a");
       link.href = source.url;
-      link.textContent = `[${index + 1}] ${source.publisher}：${source.title}`;
+      const published = source.published_at
+        ? new Date(source.published_at).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }) : null;
+      link.textContent = `[${index + 1}] ${source.publisher}：${source.title}${published ? `（${published} 日本時間）` : ""}`;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
       li.append(link);
